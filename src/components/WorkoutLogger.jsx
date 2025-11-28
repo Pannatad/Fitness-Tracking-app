@@ -253,7 +253,7 @@ const WorkoutLogger = () => {
             startRestTimer(); // Auto-start timer
         } catch (error) {
             console.error("Error saving log:", error);
-            alert("Failed to save workout. Please try again.");
+            alert(`Failed to save workout: ${error.message || error.error_description || "Unknown error"}`);
         }
     };
 
@@ -273,7 +273,7 @@ const WorkoutLogger = () => {
             setIsAddingExercise(false);
         } catch (error) {
             console.error("Error adding exercise:", error);
-            alert("Failed to add exercise.");
+            alert(`Failed to add exercise: ${error.message || error.error_description || "Unknown error"}`);
         }
     };
 

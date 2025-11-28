@@ -7,11 +7,14 @@ ALTER TABLE public.exercises ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES pu
 
 -- Update RLS for exercises to allow users to see their own + public ones
 DROP POLICY IF EXISTS "Exercises are viewable by everyone" ON public.exercises;
+DROP POLICY IF EXISTS "Exercises are viewable by everyone or owner" ON public.exercises;
+
 CREATE POLICY "Exercises are viewable by everyone or owner" ON public.exercises
 FOR SELECT USING (
   user_id IS NULL OR auth.uid() = user_id
 );
 
+DROP POLICY IF EXISTS "Users can insert their own exercises" ON public.exercises;
 CREATE POLICY "Users can insert their own exercises" ON public.exercises
 FOR INSERT WITH CHECK (
   auth.uid() = user_id
