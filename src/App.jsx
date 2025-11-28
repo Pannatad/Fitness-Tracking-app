@@ -4,6 +4,8 @@ import Layout from './components/Layout';
 import Dashboard from './components/Dashboard';
 import WorkoutLogger from './components/WorkoutLogger';
 import CalendarView from './components/CalendarView';
+import Analytics from './components/Analytics';
+import Profile from './components/Profile';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import AuthModal from './components/AuthModal';
 
@@ -19,12 +21,12 @@ const AppContent = () => {
         return <WorkoutLogger />;
       case 'history':
         return <CalendarView />;
+      case 'analytics':
+        return <Analytics />;
+      case 'profile':
+        return <Profile />;
       default:
-        return (
-          <div className="flex items-center justify-center h-64 text-zinc-500">
-            <p>Coming Soon</p>
-          </div>
-        );
+        return <Dashboard />;
     }
   };
 
