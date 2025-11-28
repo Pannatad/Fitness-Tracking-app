@@ -12,16 +12,35 @@ import { Activity, Calendar, TrendingUp, Zap } from 'lucide-react';
 import { exercises, workoutHistory as initialMockData } from '../data/mockData';
 import { getConsistencyData, getMuscleRecoveryStatus, getOneRMTrend } from '../utils/statsCalculators';
 
+import { useAuth } from '../context/AuthContext';
+import { workoutService } from '../services/workoutService';
+
 const Analytics = () => {
+    const { user } = useAuth();
+    const [history, setHistory] = useState({});
+    const [loading, setLoading] = useState(true);
+
     // Load data
-    const history = useMemo(() => {
-        const saved = localStorage.getItem('workoutHistory');
-        return saved ? JSON.parse(saved) : initialMockData;
-    }, []);
+    React.useEffect(() => {
+        if (!user) return;
+        const fetchData = async () => {
+            try {
+                const data = await workoutService.getHistory(user.id);
+                setHistory(data);
+            } catch (error) {
+                console.error("Error loading analytics:", error);
+            } finally {
+                setLoading(false);
+            }
+        };
+        fetchData();
+    }, [user]);
 
     const customExercises = useMemo(() => {
-        const saved = localStorage.getItem('customExercises');
-        return saved ? JSON.parse(saved) : [];
+        // We could fetch custom exercises here too if needed for names, 
+        // but currently we just use the IDs from history or the mock list.
+        // For now, let's just use the default list + what's in history if we had names.
+        return [];
     }, []);
 
     const allExercises = [...exercises, ...customExercises];

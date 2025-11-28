@@ -30,25 +30,25 @@ import {
     Play,
     Pause,
     RotateCcw,
-    Activity
+    Activity,
+    Loader
 } from 'lucide-react';
-import { exercises as initialExercises, workoutHistory as initialMockData } from '../data/mockData';
+import { exercises as initialExercises } from '../data/mockData';
+import { useAuth } from '../context/AuthContext';
+import { workoutService } from '../services/workoutService';
 
 const WorkoutLogger = () => {
+    const { user } = useAuth();
+    const [isLoading, setIsLoading] = useState(true);
+
+    // UI State
     const [activeRoutine, setActiveRoutine] = useState('Push');
     const [selectedExercise, setSelectedExercise] = useState(null);
-    const [activeTab, setActiveTab] = useState('Sets'); // Sets, Analyze, 1RM
+    const [activeTab, setActiveTab] = useState('Sets');
 
     // Data State
-    const [history, setHistory] = useState(() => {
-        const saved = localStorage.getItem('workoutHistory');
-        return saved ? JSON.parse(saved) : initialMockData;
-    });
-
-    const [customExercises, setCustomExercises] = useState(() => {
-        const saved = localStorage.getItem('customExercises');
-        return saved ? JSON.parse(saved) : [];
-    });
+    const [history, setHistory] = useState({});
+    const [customExercises, setCustomExercises] = useState([]);
 
     // Logging State
     const [isLogging, setIsLogging] = useState(false);
@@ -69,15 +69,28 @@ const WorkoutLogger = () => {
     const [showTimer, setShowTimer] = useState(false);
     const timerRef = useRef(null);
 
-    // Persist history changes
+    // Fetch Data from Supabase
     useEffect(() => {
-        localStorage.setItem('workoutHistory', JSON.stringify(history));
-    }, [history]);
+        if (!user) return;
 
-    // Persist custom exercises
-    useEffect(() => {
-        localStorage.setItem('customExercises', JSON.stringify(customExercises));
-    }, [customExercises]);
+        const fetchData = async () => {
+            setIsLoading(true);
+            try {
+                const [historyData, customExData] = await Promise.all([
+                    workoutService.getHistory(user.id),
+                    workoutService.getCustomExercises(user.id)
+                ]);
+                setHistory(historyData);
+                setCustomExercises(customExData);
+            } catch (error) {
+                console.error("Error fetching data:", error);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+
+        fetchData();
+    }, [user]);
 
     // Timer Logic
     useEffect(() => {
@@ -195,8 +208,8 @@ const WorkoutLogger = () => {
         setCurrentSets(newSets);
     };
 
-    const handleSaveLog = () => {
-        if (!selectedExercise) return;
+    const handleSaveLog = async () => {
+        if (!selectedExercise || !user) return;
 
         const s = currentSets[0];
         if (!s.weight || !s.reps) return;
@@ -208,45 +221,60 @@ const WorkoutLogger = () => {
             time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         }];
 
-        setHistory(prev => {
-            const exerciseHistory = [...(prev[selectedExercise.id] || [])];
-            const existingSessionIndex = exerciseHistory.findIndex(session => session.date === logDate);
+        const logData = {
+            date: logDate,
+            startTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            endTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            sets: validSets
+        };
 
-            if (existingSessionIndex >= 0) {
-                const updatedSession = { ...exerciseHistory[existingSessionIndex] };
-                updatedSession.sets = [...updatedSession.sets, ...validSets];
-                updatedSession.endTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                exerciseHistory[existingSessionIndex] = updatedSession;
-                return { ...prev, [selectedExercise.id]: exerciseHistory };
-            } else {
-                const newLog = {
-                    date: logDate,
-                    startTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                    endTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                    sets: validSets
-                };
-                return { ...prev, [selectedExercise.id]: [...exerciseHistory, newLog] };
-            }
-        });
+        try {
+            // Optimistic Update
+            setHistory(prev => {
+                const exerciseHistory = [...(prev[selectedExercise.id] || [])];
+                const existingSessionIndex = exerciseHistory.findIndex(session => session.date === logDate);
 
-        setIsLogging(false);
-        setCurrentSets([{ weight: '', reps: '', note: '' }]);
-        startRestTimer(); // Auto-start timer
+                if (existingSessionIndex >= 0) {
+                    const updatedSession = { ...exerciseHistory[existingSessionIndex] };
+                    updatedSession.sets = [...updatedSession.sets, ...validSets];
+                    updatedSession.endTime = logData.endTime;
+                    exerciseHistory[existingSessionIndex] = updatedSession;
+                    return { ...prev, [selectedExercise.id]: exerciseHistory };
+                } else {
+                    return { ...prev, [selectedExercise.id]: [...exerciseHistory, logData] };
+                }
+            });
+
+            // Save to Supabase
+            await workoutService.saveLog(user.id, selectedExercise.id, logData);
+
+            setIsLogging(false);
+            setCurrentSets([{ weight: '', reps: '', note: '' }]);
+            startRestTimer(); // Auto-start timer
+        } catch (error) {
+            console.error("Error saving log:", error);
+            alert("Failed to save workout. Please try again.");
+        }
     };
 
     // Add Exercise Handler
-    const handleAddExercise = () => {
-        if (!newExerciseName.trim()) return;
+    const handleAddExercise = async () => {
+        if (!newExerciseName.trim() || !user) return;
 
         const newExercise = {
-            id: `custom-${Date.now()}`,
             name: newExerciseName,
             category: newExerciseCategory
         };
 
-        setCustomExercises([...customExercises, newExercise]);
-        setNewExerciseName('');
-        setIsAddingExercise(false);
+        try {
+            const savedExercise = await workoutService.addCustomExercise(user.id, newExercise);
+            setCustomExercises([...customExercises, savedExercise]);
+            setNewExerciseName('');
+            setIsAddingExercise(false);
+        } catch (error) {
+            console.error("Error adding exercise:", error);
+            alert("Failed to add exercise.");
+        }
     };
 
     // Edit Handlers (omitted for brevity, assume same as before or simplified)
@@ -302,15 +330,23 @@ const WorkoutLogger = () => {
 
     // Render Main List
     if (!selectedExercise) {
+        if (isLoading) {
+            return (
+                <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+                    <Loader className="animate-spin text-emerald-400" size={32} />
+                </div>
+            );
+        }
+
         const filteredExercises = allExercises.filter(ex => ex.category === activeRoutine);
 
         return (
-            <div className="p-6 pb-24 space-y-6 animate-fade-in min-h-screen bg-cyber-black">
+            <div className="p-6 pb-24 space-y-6 animate-fade-in min-h-screen bg-zinc-950">
                 <div className="flex justify-between items-center mb-2">
-                    <h1 className="text-2xl font-bold text-white">Workout Logger</h1>
+                    <h1 className="text-2xl font-bold text-white tracking-tight">Workout Logger</h1>
                     <button
                         onClick={() => setIsAddingExercise(true)}
-                        className="w-10 h-10 bg-zinc-800 rounded-full flex items-center justify-center text-neon-green hover:bg-zinc-700 transition-colors"
+                        className="w-10 h-10 bg-zinc-900 border border-zinc-800 rounded-full flex items-center justify-center text-emerald-400 hover:bg-zinc-800 transition-colors"
                     >
                         <Plus size={20} />
                     </button>
@@ -323,8 +359,8 @@ const WorkoutLogger = () => {
                             key={routine}
                             onClick={() => setActiveRoutine(routine)}
                             className={`px-6 py-2 rounded-full text-sm font-bold whitespace-nowrap transition-all ${activeRoutine === routine
-                                ? 'bg-neon-green text-black shadow-[0_0_15px_rgba(16,185,129,0.4)]'
-                                : 'bg-cyber-gray text-gray-400 hover:text-white'
+                                ? 'bg-emerald-400 text-zinc-950 shadow-lg shadow-emerald-900/20'
+                                : 'bg-zinc-900 text-zinc-500 border border-zinc-800 hover:text-zinc-300'
                                 }`}
                         >
                             {routine}
@@ -337,44 +373,46 @@ const WorkoutLogger = () => {
                         <div
                             key={ex.id}
                             onClick={() => setSelectedExercise(ex)}
-                            className="bg-cyber-gray p-4 rounded-xl flex justify-between items-center cursor-pointer hover:bg-opacity-80 transition-colors group"
+                            className="bg-zinc-900 border border-zinc-800 p-4 rounded-2xl flex justify-between items-center cursor-pointer hover:border-zinc-700 transition-all group"
                         >
-                            <div className="flex items-center space-x-3">
-                                <div className="bg-black p-2 rounded-lg text-neon-green group-hover:text-white transition-colors">
+                            <div className="flex items-center space-x-4">
+                                <div className="bg-zinc-950 p-3 rounded-xl text-emerald-400 group-hover:text-emerald-300 transition-colors">
                                     <Dumbbell size={20} />
                                 </div>
-                                <span className="text-white font-medium">{ex.name}</span>
+                                <span className="text-white font-bold text-lg">{ex.name}</span>
                             </div>
-                            <ChevronRight className="text-gray-500 group-hover:text-neon-green transition-colors" size={20} />
+                            <ChevronRight className="text-zinc-600 group-hover:text-zinc-400 transition-colors" size={20} />
                         </div>
                     ))}
                     {filteredExercises.length === 0 && (
-                        <div className="text-center text-gray-500 py-8">
-                            No exercises found. Add one!
+                        <div className="text-center text-zinc-600 py-12 flex flex-col items-center">
+                            <Dumbbell size={48} className="mb-4 opacity-20" />
+                            <p>No exercises found.</p>
+                            <button onClick={() => setIsAddingExercise(true)} className="text-emerald-400 font-bold mt-2">Add one?</button>
                         </div>
                     )}
                 </div>
 
                 {/* Add Exercise Modal */}
                 {isAddingExercise && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in">
-                        <div className="bg-cyber-gray p-6 rounded-2xl w-full max-w-sm border border-zinc-700 space-y-4">
-                            <h3 className="text-white font-bold text-lg">Add New Exercise</h3>
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md animate-fade-in">
+                        <div className="bg-zinc-900 p-6 rounded-3xl w-full max-w-sm border border-zinc-800 space-y-6 shadow-2xl">
+                            <h3 className="text-white font-bold text-xl">Add New Exercise</h3>
                             <input
                                 type="text"
                                 placeholder="Exercise Name"
                                 value={newExerciseName}
                                 onChange={(e) => setNewExerciseName(e.target.value)}
-                                className="w-full bg-black border border-zinc-700 rounded-lg p-3 text-white outline-none focus:border-neon-green transition-colors"
+                                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-white outline-none focus:border-emerald-500 transition-colors placeholder-zinc-600 font-bold"
                             />
                             <div className="flex space-x-2 overflow-x-auto pb-2">
                                 {['Push', 'Pull', 'Legs', 'Other'].map(cat => (
                                     <button
                                         key={cat}
                                         onClick={() => setNewExerciseCategory(cat)}
-                                        className={`px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap border ${newExerciseCategory === cat
-                                            ? 'bg-neon-green text-black border-neon-green'
-                                            : 'bg-transparent text-gray-400 border-zinc-700'
+                                        className={`px-4 py-2 rounded-full text-xs font-bold whitespace-nowrap border transition-all ${newExerciseCategory === cat
+                                            ? 'bg-emerald-400 text-zinc-950 border-emerald-400'
+                                            : 'bg-transparent text-zinc-500 border-zinc-800 hover:border-zinc-600'
                                             }`}
                                     >
                                         {cat}
@@ -384,14 +422,14 @@ const WorkoutLogger = () => {
                             <div className="flex space-x-3 pt-2">
                                 <button
                                     onClick={() => setIsAddingExercise(false)}
-                                    className="flex-1 py-3 rounded-lg font-bold text-gray-400 hover:bg-zinc-800 transition-colors"
+                                    className="flex-1 py-3 rounded-xl font-bold text-zinc-400 hover:bg-zinc-800 transition-colors"
                                 >
                                     Cancel
                                 </button>
                                 <button
                                     onClick={handleAddExercise}
                                     disabled={!newExerciseName.trim()}
-                                    className={`flex-1 py-3 rounded-lg font-bold text-black transition-colors ${newExerciseName.trim() ? 'bg-neon-green hover:bg-emerald-400' : 'bg-zinc-700 text-zinc-500'}`}
+                                    className={`flex-1 py-3 rounded-xl font-bold text-zinc-950 transition-colors ${newExerciseName.trim() ? 'bg-emerald-400 hover:bg-emerald-300' : 'bg-zinc-800 text-zinc-600'}`}
                                 >
                                     Add
                                 </button>
@@ -405,31 +443,31 @@ const WorkoutLogger = () => {
 
     // Render Detailed View
     return (
-        <div className="min-h-screen bg-cyber-black flex flex-col pb-24 animate-fade-in relative">
+        <div className="min-h-screen bg-zinc-950 flex flex-col pb-24 animate-fade-in relative">
             {/* Header */}
-            <div className="p-4 flex items-center justify-between bg-cyber-black sticky top-0 z-10">
+            <div className="p-4 flex items-center justify-between bg-zinc-950 sticky top-0 z-10 border-b border-zinc-900/50 backdrop-blur-md bg-opacity-80">
                 <button
                     onClick={() => setSelectedExercise(null)}
-                    className="w-10 h-10 bg-white rounded-full flex items-center justify-center text-black hover:bg-gray-200 transition-colors"
+                    className="w-10 h-10 bg-zinc-900 border border-zinc-800 rounded-full flex items-center justify-center text-white hover:bg-zinc-800 transition-colors"
                 >
                     <ArrowLeft size={20} />
                 </button>
-                <h2 className="text-lg font-bold text-white">{selectedExercise.name}</h2>
-                <button className="w-10 h-10 bg-white rounded-full flex items-center justify-center text-black hover:bg-gray-200 transition-colors">
+                <h2 className="text-lg font-bold text-white tracking-tight">{selectedExercise.name}</h2>
+                <button className="w-10 h-10 bg-zinc-900 border border-zinc-800 rounded-full flex items-center justify-center text-white hover:bg-zinc-800 transition-colors">
                     <MoreHorizontal size={20} />
                 </button>
             </div>
 
             {/* Tabs */}
-            <div className="px-4 mb-6">
-                <div className="flex space-x-2">
+            <div className="px-4 mb-6 mt-2">
+                <div className="flex space-x-1 bg-zinc-900/50 p-1 rounded-full border border-zinc-800">
                     {['Sets', 'Analyze', '1RM'].map(tab => (
                         <button
                             key={tab}
                             onClick={() => setActiveTab(tab)}
-                            className={`flex-1 py-2 rounded-full text-sm font-bold transition-all ${activeTab === tab
-                                ? 'bg-black text-white border border-gray-700'
-                                : 'bg-gray-100 text-gray-500'
+                            className={`flex-1 py-2 rounded-full text-xs font-bold transition-all ${activeTab === tab
+                                ? 'bg-white text-zinc-950 shadow-sm'
+                                : 'text-zinc-500 hover:text-zinc-300'
                                 }`}
                         >
                             {tab === 'Sets' && <Dumbbell size={14} className="inline mr-1" />}
@@ -454,70 +492,46 @@ const WorkoutLogger = () => {
 
                     {/* Stats Comparison */}
                     {stats && (
-                        <div className="bg-white rounded-3xl p-5 shadow-lg">
-                            <div className="flex items-center space-x-2 text-gray-400 text-xs font-bold tracking-wider mb-4">
+                        <div className="bg-zinc-900 rounded-3xl p-6 shadow-xl border border-zinc-800">
+                            <div className="flex items-center space-x-2 text-zinc-500 text-xs font-bold tracking-wider mb-6 uppercase">
                                 <ArrowLeft size={12} className="rotate-45" />
-                                <span className="uppercase">Last Session vs Previous</span>
+                                <span>Last Session vs Previous</span>
                             </div>
 
-                            <div className="grid grid-cols-2 gap-y-6 gap-x-4">
+                            <div className="grid grid-cols-2 gap-y-8 gap-x-6">
                                 {/* Sets */}
-                                <div>
-                                    <div className="flex items-center space-x-2 mb-1">
-                                        <div className="w-1 h-8 bg-neon-red rounded-full"></div>
-                                        <div>
-                                            <div className="text-gray-500 text-sm font-medium">{stats.metrics.sets} Sets</div>
-                                            <div className="flex items-center text-xs text-gray-300">
-                                                <span className={stats.diffs.sets.value >= 0 ? "text-gray-400" : "text-red-400"}>
-                                                    {stats.diffs.sets.value >= 0 ? "▲" : "▼"} {Math.abs(stats.diffs.sets.value)}
-                                                </span>
-                                            </div>
-                                        </div>
+                                <div className="relative pl-3 border-l-2 border-red-400/50">
+                                    <div className="text-3xl font-bold text-white leading-none mb-1">{stats.metrics.sets}</div>
+                                    <div className="text-zinc-500 text-xs font-bold uppercase mb-1">Sets</div>
+                                    <div className={`text-xs font-bold ${stats.diffs.sets.value >= 0 ? "text-zinc-500" : "text-red-400"}`}>
+                                        {stats.diffs.sets.value >= 0 ? "▲" : "▼"} {Math.abs(stats.diffs.sets.value)}
                                     </div>
                                 </div>
 
                                 {/* Reps */}
-                                <div>
-                                    <div className="flex items-center space-x-2 mb-1">
-                                        <div className="w-1 h-8 bg-neon-green rounded-full"></div>
-                                        <div>
-                                            <div className="text-gray-500 text-sm font-medium">{stats.metrics.reps} Reps</div>
-                                            <div className="flex items-center text-xs text-neon-green">
-                                                <span className={stats.diffs.reps.value >= 0 ? "text-neon-green" : "text-red-400"}>
-                                                    {stats.diffs.reps.value >= 0 ? "▲" : "▼"} {Math.abs(stats.diffs.reps.value)}
-                                                </span>
-                                            </div>
-                                        </div>
+                                <div className="relative pl-3 border-l-2 border-emerald-400/50">
+                                    <div className="text-3xl font-bold text-white leading-none mb-1">{stats.metrics.reps}</div>
+                                    <div className="text-zinc-500 text-xs font-bold uppercase mb-1">Reps</div>
+                                    <div className={`text-xs font-bold ${stats.diffs.reps.value >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                        {stats.diffs.reps.value >= 0 ? "▲" : "▼"} {Math.abs(stats.diffs.reps.value)}
                                     </div>
                                 </div>
 
                                 {/* Volume */}
-                                <div>
-                                    <div className="flex items-center space-x-2 mb-1">
-                                        <div className="w-1 h-8 bg-neon-cyan rounded-full"></div>
-                                        <div>
-                                            <div className="text-gray-500 text-sm font-medium">{stats.metrics.volume} Vol</div>
-                                            <div className="flex items-center text-xs text-neon-green">
-                                                <span className={stats.diffs.volume.value >= 0 ? "text-neon-green" : "text-red-400"}>
-                                                    {stats.diffs.volume.value >= 0 ? "▲" : "▼"} {Math.abs(stats.diffs.volume.value)}
-                                                </span>
-                                            </div>
-                                        </div>
+                                <div className="relative pl-3 border-l-2 border-blue-400/50">
+                                    <div className="text-3xl font-bold text-white leading-none mb-1">{stats.metrics.volume}</div>
+                                    <div className="text-zinc-500 text-xs font-bold uppercase mb-1">Vol</div>
+                                    <div className={`text-xs font-bold ${stats.diffs.volume.value >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                        {stats.diffs.volume.value >= 0 ? "▲" : "▼"} {Math.abs(stats.diffs.volume.value)}
                                     </div>
                                 </div>
 
                                 {/* kg/rep */}
-                                <div>
-                                    <div className="flex items-center space-x-2 mb-1">
-                                        <div className="w-1 h-8 bg-neon-orange rounded-full"></div>
-                                        <div>
-                                            <div className="text-gray-500 text-sm font-medium">{Math.round(stats.metrics.avgWeight)} kg/avg</div>
-                                            <div className="flex items-center text-xs text-gray-300">
-                                                <span className={stats.diffs.avgWeight.value >= 0 ? "text-gray-400" : "text-red-400"}>
-                                                    {stats.diffs.avgWeight.value >= 0 ? "▲" : "▼"} {Math.abs(stats.diffs.avgWeight.value)}
-                                                </span>
-                                            </div>
-                                        </div>
+                                <div className="relative pl-3 border-l-2 border-orange-300/50">
+                                    <div className="text-3xl font-bold text-white leading-none mb-1">{Math.round(stats.metrics.avgWeight)}</div>
+                                    <div className="text-zinc-500 text-xs font-bold uppercase mb-1">kg/avg</div>
+                                    <div className={`text-xs font-bold ${stats.diffs.avgWeight.value >= 0 ? "text-zinc-500" : "text-red-400"}`}>
+                                        {stats.diffs.avgWeight.value >= 0 ? "▲" : "▼"} {Math.abs(stats.diffs.avgWeight.value)}
                                     </div>
                                 </div>
                             </div>
@@ -529,34 +543,34 @@ const WorkoutLogger = () => {
                         {history[selectedExercise.id]?.slice().reverse().map((session, sessionIndex) => (
                             <div key={sessionIndex} className="relative">
                                 {/* Date Header */}
-                                <div className="flex items-center text-gray-400 text-sm font-bold mb-4">
+                                <div className="flex items-center text-zinc-500 text-xs font-bold uppercase tracking-wider mb-4 pl-2">
                                     <span>{formatDate(session.date)}</span>
-                                    <ChevronRight size={14} className="ml-1" />
+                                    <ChevronRight size={12} className="ml-1" />
                                 </div>
 
                                 {/* Sets List */}
-                                <div className="space-y-4">
+                                <div className="space-y-1">
                                     {session.sets.map((set, setIndex) => (
                                         <div
                                             key={setIndex}
                                             onClick={() => openEditSet(sessionIndex, setIndex, session, set)}
-                                            className="flex items-center justify-between py-2 border-b border-gray-800 last:border-0 cursor-pointer hover:bg-gray-900 transition-colors rounded-lg px-2 -mx-2"
+                                            className="flex items-center justify-between py-3 px-4 border-b border-zinc-900 last:border-0 cursor-pointer hover:bg-zinc-900/50 transition-colors rounded-xl"
                                         >
-                                            <div className="flex items-center space-x-6 text-gray-400 text-sm">
+                                            <div className="flex items-center space-x-6 text-zinc-500 text-sm font-mono">
                                                 <span className="w-4 text-center">{setIndex + 1}</span>
-                                                <span>{set.time || '18:00'}</span>
+                                                <span>{set.time || '00:00'}</span>
                                             </div>
 
                                             <div className="flex items-center space-x-8">
                                                 <div className="flex items-center space-x-1">
-                                                    <span className="text-neon-green font-bold text-lg">{set.reps}</span>
-                                                    <span className="text-neon-green text-xs font-medium">rep</span>
+                                                    <span className="text-emerald-400 font-bold text-lg">{set.reps}</span>
+                                                    <span className="text-zinc-600 text-xs font-bold uppercase">rep</span>
                                                 </div>
                                                 <div className="flex items-center space-x-1 w-16 justify-end">
-                                                    <span className="text-neon-orange font-bold text-lg">{set.weight}</span>
-                                                    <span className="text-neon-orange text-xs font-medium">kg</span>
+                                                    <span className="text-orange-300 font-bold text-lg">{set.weight}</span>
+                                                    <span className="text-zinc-600 text-xs font-bold uppercase">kg</span>
                                                 </div>
-                                                <ChevronRight size={16} className="text-gray-600" />
+                                                <ChevronRight size={16} className="text-zinc-700" />
                                             </div>
                                         </div>
                                     ))}
@@ -571,34 +585,34 @@ const WorkoutLogger = () => {
             {activeTab === 'Analyze' && analyticsData && (
                 <div className="flex-1 px-4 space-y-8 pb-24">
                     {/* Volume Progression Chart */}
-                    <div className="bg-zinc-900/50 rounded-3xl p-6 border border-zinc-800">
+                    <div className="bg-zinc-900 rounded-3xl p-6 border border-zinc-800 shadow-xl">
                         <div className="flex items-center justify-between mb-6">
                             <h3 className="text-white font-bold flex items-center gap-2">
-                                <Activity size={18} className="text-neon-cyan" />
+                                <Activity size={18} className="text-emerald-400" />
                                 Volume Progression
                             </h3>
-                            <span className="text-xs text-gray-500">Total Volume (kg)</span>
+                            <span className="text-xs text-zinc-500 font-bold uppercase">Total Volume (kg)</span>
                         </div>
                         <div className="h-48 w-full">
                             <ResponsiveContainer width="100%" height="100%">
                                 <AreaChart data={analyticsData.sessionProgress}>
                                     <defs>
                                         <linearGradient id="colorVolume" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3} />
-                                            <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
+                                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                                            <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
                                         </linearGradient>
                                     </defs>
                                     <CartesianGrid strokeDasharray="3 3" stroke="#333" vertical={false} />
                                     <XAxis dataKey="date" hide />
                                     <YAxis hide />
                                     <Tooltip
-                                        contentStyle={{ backgroundColor: '#000', border: '1px solid #333', borderRadius: '8px' }}
-                                        itemStyle={{ color: '#fff' }}
+                                        contentStyle={{ backgroundColor: '#09090b', border: '1px solid #27272a', borderRadius: '12px' }}
+                                        itemStyle={{ color: '#fff', fontWeight: 'bold' }}
                                     />
                                     <Area
                                         type="monotone"
                                         dataKey="volume"
-                                        stroke="#06b6d4"
+                                        stroke="#10b981"
                                         strokeWidth={3}
                                         fillOpacity={1}
                                         fill="url(#colorVolume)"
@@ -609,10 +623,10 @@ const WorkoutLogger = () => {
                     </div>
 
                     {/* Consistency Calendar (GitHub Style) */}
-                    <div className="bg-zinc-900/50 rounded-3xl p-6 border border-zinc-800">
+                    <div className="bg-zinc-900 rounded-3xl p-6 border border-zinc-800 shadow-xl">
                         <div className="flex items-center justify-between mb-6">
                             <h3 className="text-white font-bold flex items-center gap-2">
-                                <Calendar size={18} className="text-neon-green" />
+                                <Calendar size={18} className="text-emerald-400" />
                                 Consistency Streak
                             </h3>
                         </div>
@@ -621,28 +635,27 @@ const WorkoutLogger = () => {
                             {Array.from({ length: 50 }).map((_, i) => {
                                 // Randomly active for demo purposes if no real data
                                 const isReal = i < analyticsData.sessionProgress.length;
-                                const opacity = isReal ? 0.8 : 0.1;
                                 return (
                                     <div
                                         key={i}
-                                        className="w-3 h-3 rounded-sm bg-neon-green"
-                                        style={{ opacity: isReal ? 1 : 0.1 }}
+                                        className={`w-3 h-3 rounded-sm ${isReal ? 'bg-emerald-500' : 'bg-zinc-800'}`}
+                                        style={{ opacity: isReal ? 1 : 0.5 }}
                                         title={isReal ? "Workout done" : "No workout"}
                                     />
                                 );
                             })}
                         </div>
-                        <p className="text-xs text-gray-500 mt-4">Visual proof of your "Progressive Overload"</p>
+                        <p className="text-xs text-zinc-500 mt-4 font-medium">Visual proof of your "Progressive Overload"</p>
                     </div>
 
                     {/* Max Weight Trend */}
-                    <div className="bg-zinc-900/50 rounded-3xl p-6 border border-zinc-800">
+                    <div className="bg-zinc-900 rounded-3xl p-6 border border-zinc-800 shadow-xl">
                         <div className="flex items-center justify-between mb-6">
                             <h3 className="text-white font-bold flex items-center gap-2">
-                                <TrendingUp size={18} className="text-neon-orange" />
+                                <TrendingUp size={18} className="text-orange-400" />
                                 Max Weight Trend
                             </h3>
-                            <span className="text-xs text-gray-500">Heaviest Set (kg)</span>
+                            <span className="text-xs text-zinc-500 font-bold uppercase">Heaviest Set (kg)</span>
                         </div>
                         <div className="h-48 w-full">
                             <ResponsiveContainer width="100%" height="100%">
@@ -651,15 +664,15 @@ const WorkoutLogger = () => {
                                     <XAxis dataKey="date" hide />
                                     <YAxis hide domain={['dataMin - 5', 'dataMax + 5']} />
                                     <Tooltip
-                                        contentStyle={{ backgroundColor: '#000', border: '1px solid #333', borderRadius: '8px' }}
-                                        itemStyle={{ color: '#fff' }}
+                                        contentStyle={{ backgroundColor: '#09090b', border: '1px solid #27272a', borderRadius: '12px' }}
+                                        itemStyle={{ color: '#fff', fontWeight: 'bold' }}
                                     />
                                     <Line
                                         type="monotone"
                                         dataKey="maxWeight"
-                                        stroke="#f97316"
+                                        stroke="#fb923c"
                                         strokeWidth={3}
-                                        dot={{ fill: '#f97316', r: 4 }}
+                                        dot={{ fill: '#fb923c', r: 4 }}
                                     />
                                 </LineChart>
                             </ResponsiveContainer>
@@ -672,7 +685,7 @@ const WorkoutLogger = () => {
             <div className="fixed bottom-24 left-0 right-0 flex justify-center z-20 pointer-events-none">
                 <button
                     onClick={() => setIsLogging(true)}
-                    className="bg-neon-green text-white w-14 h-14 rounded-full flex items-center justify-center shadow-[0_0_20px_rgba(16,185,129,0.5)] pointer-events-auto hover:scale-110 transition-transform"
+                    className="bg-emerald-400 text-zinc-950 w-14 h-14 rounded-full flex items-center justify-center shadow-[0_0_20px_rgba(16,185,129,0.3)] pointer-events-auto hover:scale-110 transition-transform"
                 >
                     <Plus size={32} />
                 </button>
@@ -680,14 +693,14 @@ const WorkoutLogger = () => {
 
             {/* Auto-Rest Timer Overlay */}
             {showTimer && (
-                <div className="fixed bottom-0 left-0 right-0 bg-zinc-900 border-t border-zinc-800 p-4 z-50 flex items-center justify-between animate-slide-up">
+                <div className="fixed bottom-0 left-0 right-0 bg-zinc-900 border-t border-zinc-800 p-4 z-50 flex items-center justify-between animate-slide-up shadow-2xl">
                     <div className="flex items-center space-x-4">
-                        <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center text-neon-green font-mono font-bold text-lg border border-zinc-700">
+                        <div className="w-12 h-12 rounded-full bg-zinc-950 flex items-center justify-center text-emerald-400 font-mono font-bold text-lg border border-zinc-800">
                             {formatTime(timerTime)}
                         </div>
                         <div>
                             <div className="text-white font-bold text-sm">Rest Timer</div>
-                            <div className="text-xs text-gray-400">Next set in {formatTime(timerTime)}</div>
+                            <div className="text-xs text-zinc-500">Next set in {formatTime(timerTime)}</div>
                         </div>
                     </div>
                     <div className="flex items-center space-x-3">
@@ -702,7 +715,7 @@ const WorkoutLogger = () => {
                                 setTimerActive(false);
                                 setShowTimer(false);
                             }}
-                            className="px-3 py-2 bg-red-500/20 text-red-400 rounded-lg text-xs font-bold hover:bg-red-500/30"
+                            className="px-3 py-2 bg-red-500/10 text-red-400 rounded-lg text-xs font-bold hover:bg-red-500/20"
                         >
                             Skip
                         </button>
@@ -712,13 +725,13 @@ const WorkoutLogger = () => {
 
             {/* Logging Modal */}
             {isLogging && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black bg-cyber-black animate-fade-in">
-                    <div className="w-full h-full max-w-md bg-cyber-gray flex flex-col">
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md animate-fade-in">
+                    <div className="w-full h-full max-w-md bg-zinc-950 flex flex-col">
                         {/* Header */}
-                        <div className="p-4 flex items-center justify-between bg-cyber-black shadow-md">
+                        <div className="p-4 flex items-center justify-between bg-zinc-950 border-b border-zinc-900">
                             <button
                                 onClick={() => setIsLogging(false)}
-                                className="w-10 h-10 bg-transparent rounded-full flex items-center justify-center text-white hover:bg-zinc-800 transition-colors"
+                                className="w-10 h-10 bg-transparent rounded-full flex items-center justify-center text-white hover:bg-zinc-900 transition-colors"
                             >
                                 <ArrowLeft size={24} />
                             </button>
@@ -726,18 +739,18 @@ const WorkoutLogger = () => {
                             <button
                                 onClick={handleSaveLog}
                                 disabled={!currentSets[0].weight || !currentSets[0].reps}
-                                className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors shadow-[0_0_15px_rgba(16,185,129,0.4)]
+                                className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors shadow-lg
                                     ${currentSets[0].weight && currentSets[0].reps
-                                        ? 'bg-neon-green text-black hover:bg-emerald-400'
-                                        : 'bg-zinc-800 text-zinc-500 cursor-not-allowed shadow-none'}`}
+                                        ? 'bg-emerald-400 text-zinc-950 hover:bg-emerald-300 shadow-emerald-900/20'
+                                        : 'bg-zinc-800 text-zinc-600 cursor-not-allowed shadow-none'}`}
                             >
                                 <Check size={20} />
                             </button>
                         </div>
 
-                        <div className="flex-1 p-6 space-y-6 overflow-y-auto bg-black">
+                        <div className="flex-1 p-6 space-y-6 overflow-y-auto bg-zinc-950">
                             {/* Inputs Card */}
-                            <div className="bg-zinc-900 rounded-3xl p-6 space-y-6 border border-zinc-800">
+                            <div className="bg-zinc-900 rounded-3xl p-6 space-y-6 border border-zinc-800 shadow-xl">
                                 {/* Reps */}
                                 <div className="flex justify-between items-center border-b border-zinc-800 pb-4">
                                     <input
@@ -745,12 +758,12 @@ const WorkoutLogger = () => {
                                         placeholder="0"
                                         value={currentSets[0].reps}
                                         onChange={(e) => handleSetChange(0, 'reps', e.target.value)}
-                                        className="text-5xl font-bold text-white w-32 outline-none bg-transparent placeholder-zinc-700"
+                                        className="text-5xl font-bold text-white w-32 outline-none bg-transparent placeholder-zinc-800"
                                         autoFocus
                                     />
-                                    <div className="flex items-center space-x-2 text-zinc-400">
+                                    <div className="flex items-center space-x-2 text-zinc-500">
                                         <Dumbbell size={18} />
-                                        <span className="font-medium">Repetitions</span>
+                                        <span className="font-bold uppercase text-xs tracking-wider">Reps</span>
                                     </div>
                                 </div>
 
@@ -761,24 +774,24 @@ const WorkoutLogger = () => {
                                         placeholder="0"
                                         value={currentSets[0].weight}
                                         onChange={(e) => handleSetChange(0, 'weight', e.target.value)}
-                                        className="text-5xl font-bold text-white w-32 outline-none bg-transparent placeholder-zinc-700"
+                                        className="text-5xl font-bold text-white w-32 outline-none bg-transparent placeholder-zinc-800"
                                     />
-                                    <div className="flex items-center space-x-2 text-zinc-400">
-                                        <div className="w-4 h-4 rounded-full border-2 border-zinc-400"></div>
-                                        <span className="font-medium">Weight (kg)</span>
+                                    <div className="flex items-center space-x-2 text-zinc-500">
+                                        <div className="w-4 h-4 rounded-full border-2 border-zinc-500"></div>
+                                        <span className="font-bold uppercase text-xs tracking-wider">kg</span>
                                     </div>
                                 </div>
                             </div>
 
                             {/* Notes Card */}
                             <div className="space-y-2">
-                                <label className="text-zinc-400 font-bold ml-2 text-sm">Notes</label>
+                                <label className="text-zinc-500 font-bold ml-2 text-xs uppercase tracking-wider">Notes</label>
                                 <div className="bg-zinc-900 rounded-3xl p-4 border border-zinc-800">
                                     <textarea
                                         value={currentSets[0].note || ''}
                                         onChange={(e) => handleSetChange(0, 'note', e.target.value)}
                                         placeholder="Write a note..."
-                                        className="w-full h-24 bg-transparent text-white outline-none resize-none placeholder-zinc-600 text-sm"
+                                        className="w-full h-24 bg-transparent text-white outline-none resize-none placeholder-zinc-700 text-sm"
                                     />
                                 </div>
                             </div>
@@ -786,8 +799,8 @@ const WorkoutLogger = () => {
                             {/* Date Card */}
                             <div className="bg-zinc-900 rounded-2xl p-4 flex justify-between items-center border border-zinc-800">
                                 <span className="text-white font-bold">Date</span>
-                                <div className="flex items-center space-x-2 bg-zinc-800 px-3 py-1.5 rounded-lg">
-                                    <Calendar size={14} className="text-zinc-400" />
+                                <div className="flex items-center space-x-2 bg-zinc-950 px-3 py-1.5 rounded-lg border border-zinc-800">
+                                    <Calendar size={14} className="text-zinc-500" />
                                     <input
                                         type="date"
                                         value={logDate}
@@ -803,41 +816,41 @@ const WorkoutLogger = () => {
 
             {/* Edit Set Modal */}
             {editingSet && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black bg-cyber-black animate-fade-in">
-                    <div className="w-full h-full max-w-md bg-cyber-gray flex flex-col">
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md animate-fade-in">
+                    <div className="w-full h-full max-w-md bg-zinc-950 flex flex-col">
                         {/* Header */}
-                        <div className="p-4 flex items-center justify-between bg-cyber-black shadow-md">
+                        <div className="p-4 flex items-center justify-between bg-zinc-950 border-b border-zinc-900">
                             <button
                                 onClick={() => setEditingSet(null)}
-                                className="w-10 h-10 bg-transparent rounded-full flex items-center justify-center text-white hover:bg-zinc-800 transition-colors"
+                                className="w-10 h-10 bg-transparent rounded-full flex items-center justify-center text-white hover:bg-zinc-900 transition-colors"
                             >
                                 <ArrowLeft size={24} />
                             </button>
                             <div className="flex flex-col items-center">
-                                <span className="text-xs text-zinc-400 uppercase tracking-wider font-bold">Exercise</span>
+                                <span className="text-xs text-zinc-500 uppercase tracking-wider font-bold">Exercise</span>
                                 <h2 className="text-lg font-bold text-white">{selectedExercise.name}</h2>
                             </div>
                             <button
                                 onClick={handleUpdateSet}
-                                className="w-10 h-10 bg-neon-green rounded-full flex items-center justify-center text-black hover:bg-emerald-400 transition-colors shadow-[0_0_15px_rgba(16,185,129,0.4)]"
+                                className="w-10 h-10 bg-emerald-400 rounded-full flex items-center justify-center text-zinc-950 hover:bg-emerald-300 transition-colors shadow-lg shadow-emerald-900/20"
                             >
                                 <Check size={20} />
                             </button>
                         </div>
 
-                        <div className="flex-1 p-6 space-y-8 overflow-y-auto bg-black">
+                        <div className="flex-1 p-6 space-y-8 overflow-y-auto bg-zinc-950">
                             {/* Inputs */}
-                            <div className="bg-zinc-900 rounded-3xl p-6 space-y-6 border border-zinc-800">
+                            <div className="bg-zinc-900 rounded-3xl p-6 space-y-6 border border-zinc-800 shadow-xl">
                                 <div className="flex justify-between items-center border-b border-zinc-800 pb-4">
                                     <input
                                         type="number"
                                         value={editingSet.reps}
                                         onChange={(e) => setEditingSet({ ...editingSet, reps: e.target.value })}
-                                        className="text-5xl font-bold text-white w-32 outline-none bg-transparent placeholder-zinc-700"
+                                        className="text-5xl font-bold text-white w-32 outline-none bg-transparent placeholder-zinc-800"
                                     />
-                                    <div className="flex items-center space-x-2 text-zinc-400">
+                                    <div className="flex items-center space-x-2 text-zinc-500">
                                         <Dumbbell size={18} />
-                                        <span className="font-medium">Repetitions</span>
+                                        <span className="font-bold uppercase text-xs tracking-wider">Reps</span>
                                     </div>
                                 </div>
                                 <div className="flex justify-between items-center">
@@ -845,24 +858,24 @@ const WorkoutLogger = () => {
                                         type="number"
                                         value={editingSet.weight}
                                         onChange={(e) => setEditingSet({ ...editingSet, weight: e.target.value })}
-                                        className="text-5xl font-bold text-white w-32 outline-none bg-transparent placeholder-zinc-700"
+                                        className="text-5xl font-bold text-white w-32 outline-none bg-transparent placeholder-zinc-800"
                                     />
-                                    <div className="flex items-center space-x-2 text-zinc-400">
-                                        <div className="w-4 h-4 rounded-full border-2 border-zinc-400"></div>
-                                        <span className="font-medium">Weight (kg)</span>
+                                    <div className="flex items-center space-x-2 text-zinc-500">
+                                        <div className="w-4 h-4 rounded-full border-2 border-zinc-500"></div>
+                                        <span className="font-bold uppercase text-xs tracking-wider">kg</span>
                                     </div>
                                 </div>
                             </div>
 
                             {/* Notes */}
                             <div className="space-y-2">
-                                <label className="text-zinc-400 font-bold ml-2 text-sm">Notes</label>
+                                <label className="text-zinc-500 font-bold ml-2 text-xs uppercase tracking-wider">Notes</label>
                                 <div className="bg-zinc-900 rounded-3xl p-4 border border-zinc-800">
                                     <textarea
                                         value={editingSet.note}
                                         onChange={(e) => setEditingSet({ ...editingSet, note: e.target.value })}
                                         placeholder="Write a note..."
-                                        className="w-full h-24 bg-transparent text-white outline-none resize-none placeholder-zinc-600 text-sm"
+                                        className="w-full h-24 bg-transparent text-white outline-none resize-none placeholder-zinc-700 text-sm"
                                     />
                                 </div>
                             </div>
@@ -873,10 +886,10 @@ const WorkoutLogger = () => {
                                     <span className="text-white font-bold">Date</span>
                                 </div>
                                 <div className="flex space-x-2">
-                                    <span className="bg-zinc-800 px-3 py-1 rounded-lg text-sm font-bold text-zinc-400">
+                                    <span className="bg-zinc-950 px-3 py-1 rounded-lg text-sm font-bold text-zinc-500 border border-zinc-800">
                                         {formatDate(editingSet.date)}
                                     </span>
-                                    <span className="bg-zinc-800 px-3 py-1 rounded-lg text-sm font-bold text-zinc-400">
+                                    <span className="bg-zinc-950 px-3 py-1 rounded-lg text-sm font-bold text-zinc-500 border border-zinc-800">
                                         {editingSet.time}
                                     </span>
                                 </div>
@@ -885,7 +898,7 @@ const WorkoutLogger = () => {
                             {/* Delete Button */}
                             <button
                                 onClick={handleDeleteSet}
-                                className="w-full bg-zinc-900 text-neon-red py-4 rounded-3xl font-bold flex items-center justify-center space-x-2 border border-zinc-800 hover:bg-zinc-800 transition-colors"
+                                className="w-full bg-zinc-900 text-red-400 py-4 rounded-3xl font-bold flex items-center justify-center space-x-2 border border-zinc-800 hover:bg-zinc-800 transition-colors"
                             >
                                 <Trash2 size={20} />
                                 <span>Delete</span>

@@ -4,15 +4,18 @@ import { useAuth } from '../context/AuthContext';
 import { workoutHistory as initialMockData } from '../data/mockData';
 import { calculateUserLevel } from '../utils/statsCalculators';
 
+import { workoutService } from '../services/workoutService';
+
 const Profile = () => {
     const { user, signOut } = useAuth();
     const [theme, setTheme] = useState('gym'); // 'gym' or 'cozy'
+    const [history, setHistory] = useState({});
 
     // Load history for gamification
-    const history = useMemo(() => {
-        const saved = localStorage.getItem('workoutHistory');
-        return saved ? JSON.parse(saved) : initialMockData;
-    }, []);
+    React.useEffect(() => {
+        if (!user) return;
+        workoutService.getHistory(user.id).then(setHistory).catch(console.error);
+    }, [user]);
 
     const userStats = useMemo(() => calculateUserLevel(history), [history]);
 
@@ -28,12 +31,17 @@ const Profile = () => {
         linkElement.click();
     };
 
-    const handleClearData = () => {
-        if (window.confirm("Are you sure? This will delete ALL your workout history permanently.")) {
+    const handleClearData = async () => {
+        if (window.confirm("Are you sure? This will delete ALL your workout history permanently from the cloud.")) {
             if (window.confirm("Really? There is no going back.")) {
-                localStorage.removeItem('workoutHistory');
-                localStorage.removeItem('customExercises');
-                window.location.reload();
+                try {
+                    await workoutService.clearData(user.id);
+                    setHistory({});
+                    alert("Data cleared.");
+                } catch (error) {
+                    console.error("Error clearing data:", error);
+                    alert("Failed to clear data.");
+                }
             }
         }
     };
